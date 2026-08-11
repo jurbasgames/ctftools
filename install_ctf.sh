@@ -18,6 +18,19 @@ CTF_USER="${CTF_USER:-ctf}"
 TOOLS_DIR="/home/$CTF_USER/tools"
 VENV_DIR="/home/$CTF_USER/venv"
 
+# ── Pinned versions ──────────────────────────────────────────────────────────
+GHIDRA_VER="12.1.2"
+GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip"
+PWNDBG_TAG="2026.07.29"
+PWNTOOLS_VER="4.15.0"
+PYCRYPTODOME_VER="latest"
+ROPGADGET_VER="7.7"
+FFUF_VER="2.2.1"
+FFUF_URL="https://github.com/ffuf/ffuf/releases/download/v${FFUF_VER}/ffuf_${FFUF_VER}_linux_amd64.tar.gz"
+JOHN_VER="1.9.0-jumbo-1"
+JOHN_URL="https://www.openwall.com/john/k/john-${JOHN_VER}.tar.xz"
+BURP_URL="https://portswigger.net/burp/releases/download?product=community&type=Jar"
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 info()  { echo "[*] $*"; }
 ok()    { echo "[+] $*"; }
@@ -49,27 +62,30 @@ chown "$CTF_USER:$CTF_USER" "$TOOLS_DIR"
 info "Installing apt packages..."
 apt-get update -qq
 apt-get install -y \
-    gdb git wget curl unzip \
+    gdb git wget curl unzip xz-utils \
     python3 python3-pip python3-venv \
     libimage-exiftool-perl \
-    openjdk-21-jdk
+    openjdk-21-jdk \
+    wireshark tshark \
+    steghide \
+    libssl-dev zlib1g-dev libbz2-dev libgmp-dev
 ok "apt packages installed"
 
 # ── 3. pwndbg ─────────────────────────────────────────────────────────────────
 PWNDBG_DIR="$TOOLS_DIR/pwndbg"
-info "Installing pwndbg..."
+info "Installing pwndbg ${PWNDBG_TAG}..."
 if [[ -d "$PWNDBG_DIR" ]]; then
     skip "pwndbg directory already exists at $PWNDBG_DIR"
 else
-    as_ctf git clone --depth=1 https://github.com/pwndbg/pwndbg "$PWNDBG_DIR"
+    as_ctf git clone --depth=1 --branch "$PWNDBG_TAG" https://github.com/pwndbg/pwndbg "$PWNDBG_DIR"
     # setup.sh must run as root to install system deps, but configures gdb for ctf user
     # Must cd into the pwndbg dir first — uv looks for pyproject.toml in the cwd
     (cd "$PWNDBG_DIR" && HOME="/home/$CTF_USER" SUDO_USER="$CTF_USER" bash setup.sh)
-    ok "pwndbg installed"
+    ok "pwndbg ${PWNDBG_TAG} installed"
 fi
 
 # ── 4. Ghidra ─────────────────────────────────────────────────────────────────
-info "Installing Ghidra..."
+info "Installing Ghidra ${GHIDRA_VER}..."
 if [[ -n "$(find "$TOOLS_DIR" -maxdepth 1 -type d -name "ghidra_*" 2>/dev/null)" ]]; then
     skip "Ghidra already installed in $TOOLS_DIR"
 else
@@ -77,16 +93,7 @@ else
         info "Using bundled downloads/ghidra.zip..."
         cp "$SCRIPT_DIR/downloads/ghidra.zip" /tmp/ghidra.zip
     else
-        info "Fetching latest Ghidra release info from GitHub..."
-        RELEASE_JSON=$(curl -fsSL https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest)
-        GHIDRA_URL=$(echo "$RELEASE_JSON" | grep '"browser_download_url"' | grep '\.zip"' | head -1 | sed 's/.*"browser_download_url": "\(.*\)".*/\1/')
-
-        if [[ -z "$GHIDRA_URL" ]]; then
-            echo "[!] Could not determine Ghidra download URL. Check your internet connection and try again."
-            exit 1
-        fi
-
-        info "Downloading Ghidra from $GHIDRA_URL ..."
+        info "Downloading Ghidra ${GHIDRA_VER} from GitHub..."
         wget -q --show-progress -O /tmp/ghidra.zip "$GHIDRA_URL"
     fi
     unzip -q /tmp/ghidra.zip -d "$TOOLS_DIR"
@@ -100,7 +107,7 @@ exec "$GHIDRA_RUN" "$@"
 EOF
     chmod +x "$TOOLS_DIR/ghidra"
     chown -R "$CTF_USER:$CTF_USER" "$TOOLS_DIR"/ghidra_* "$TOOLS_DIR/ghidra"
-    ok "Ghidra installed in $TOOLS_DIR"
+    ok "Ghidra ${GHIDRA_VER} installed in $TOOLS_DIR"
 fi
 
 # ── 5. Burp Suite Community ───────────────────────────────────────────────────
@@ -116,7 +123,7 @@ else
         info "Downloading Burp Suite Community JAR..."
         wget -q --show-progress \
             -O "$BURP_JAR" \
-            "https://portswigger.net/burp/releases/download?product=community&type=Jar"
+            "$BURP_URL"
     fi
 
     # Wrapper script so 'burpsuite' is on PATH
@@ -138,12 +145,71 @@ else
     ok "venv created at $VENV_DIR"
 fi
 
-info "Installing pwntools and pycryptodome..."
+info "Installing pwntools ${PWNTOOLS_VER}, pycryptodome, ROPgadget ${ROPGADGET_VER}..."
 as_ctf "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-as_ctf "$VENV_DIR/bin/pip" install --quiet pwntools pycryptodome
+as_ctf "$VENV_DIR/bin/pip" install --quiet \
+    "pwntools==${PWNTOOLS_VER}" \
+    pycryptodome \
+    "ROPgadget==${ROPGADGET_VER}"
 ok "Python packages installed"
 
-# ── 7. Configure .bashrc ──────────────────────────────────────────────────────
+# ── 7. ffuf ───────────────────────────────────────────────────────────────────
+FFUF_BIN="$TOOLS_DIR/ffuf"
+info "Installing ffuf v${FFUF_VER}..."
+if [[ -x "$FFUF_BIN" ]]; then
+    skip "ffuf already installed at $FFUF_BIN"
+else
+    if [[ -f "$SCRIPT_DIR/downloads/ffuf.tar.gz" ]]; then
+        info "Using bundled downloads/ffuf.tar.gz..."
+        cp "$SCRIPT_DIR/downloads/ffuf.tar.gz" /tmp/ffuf.tar.gz
+    else
+        info "Downloading ffuf v${FFUF_VER}..."
+        wget -q --show-progress -O /tmp/ffuf.tar.gz "$FFUF_URL"
+    fi
+    tar -xzf /tmp/ffuf.tar.gz -C "$TOOLS_DIR" ffuf
+    rm /tmp/ffuf.tar.gz
+    chmod +x "$FFUF_BIN"
+    chown "$CTF_USER:$CTF_USER" "$FFUF_BIN"
+    ok "ffuf v${FFUF_VER} installed"
+fi
+
+# ── 8. John the Ripper (jumbo) ────────────────────────────────────────────────
+JOHN_DIR="$TOOLS_DIR/john"
+JOHN_RUN="$JOHN_DIR/run/john"
+info "Installing John the Ripper ${JOHN_VER}..."
+if [[ -x "$JOHN_RUN" ]]; then
+    skip "John the Ripper already installed at $JOHN_RUN"
+else
+    if [[ -f "$SCRIPT_DIR/downloads/john.tar.xz" ]]; then
+        info "Using bundled downloads/john.tar.xz..."
+        cp "$SCRIPT_DIR/downloads/john.tar.xz" /tmp/john.tar.xz
+    else
+        info "Downloading John the Ripper ${JOHN_VER} source..."
+        wget -q --show-progress -O /tmp/john.tar.xz "$JOHN_URL"
+    fi
+
+    info "Compiling John the Ripper (this takes a few minutes)..."
+    mkdir -p "$JOHN_DIR"
+    tar -xf /tmp/john.tar.xz -C "$JOHN_DIR" --strip-components=1
+    rm /tmp/john.tar.xz
+
+    (
+        cd "$JOHN_DIR/src"
+        ./configure --quiet
+        make -sj"$(nproc)"
+    )
+    chown -R "$CTF_USER:$CTF_USER" "$JOHN_DIR"
+
+    # Wrapper so 'john' is on PATH
+    cat > "$TOOLS_DIR/john" <<'EOF'
+#!/bin/bash
+exec "$(dirname "$(readlink -f "$0")")/john/run/john" "$@"
+EOF
+    chmod +x "$TOOLS_DIR/john"
+    ok "John the Ripper ${JOHN_VER} installed"
+fi
+
+# ── 9. Configure .bashrc ──────────────────────────────────────────────────────
 BASHRC="/home/$CTF_USER/.bashrc"
 MARKER="# CTF tools setup"
 info "Configuring .bashrc..."
@@ -159,7 +225,7 @@ EOF
     ok ".bashrc configured"
 fi
 
-# ── 8. Final ownership fix ────────────────────────────────────────────────────
+# ── 10. Final ownership fix ───────────────────────────────────────────────────
 chown -R "$CTF_USER:$CTF_USER" "/home/$CTF_USER"
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -167,7 +233,6 @@ echo ""
 echo "================================================================"
 echo " Installation complete!"
 echo "  User:     $CTF_USER"
-echo "  Password: $CTF_PASS"
 echo "  Tools:    $TOOLS_DIR"
 echo ""
 echo "  Switch to the CTF user with:  su - $CTF_USER"
@@ -176,6 +241,11 @@ echo "    exiftool -ver"
 echo "    gdb --version"
 echo "    python3 -c \"import pwn; print('pwntools ok')\""
 echo "    python3 -c \"from Crypto.Cipher import AES; print('pycryptodome ok')\""
+echo "    python3 -c \"import ROPgadget; print('ropgadget ok')\""
+echo "    tshark --version"
+echo "    steghide --help"
+echo "    john --list=build-info"
+echo "    ffuf -V"
 echo "    ghidra &"
 echo "    burpsuite &"
 echo "================================================================"
