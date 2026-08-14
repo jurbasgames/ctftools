@@ -9,15 +9,16 @@ export MAKEFLAGS="-j2"
 
 # ── Config ──────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [[ -f "$SCRIPT_DIR/.env" ]]; then
+if [[ -z "${CTF_PASS:-}" && -f "$SCRIPT_DIR/.env" ]]; then
     # shellcheck source=/dev/null
     source "$SCRIPT_DIR/.env"
-else
-    echo "[!] .env file not found at $SCRIPT_DIR/.env"
-    exit 1
 fi
 
 CTF_USER="${CTF_USER:-ctf}"
+if [[ -z "${CTF_PASS:-}" ]]; then
+    echo "[!] Set CTF_PASS or create $SCRIPT_DIR/.env"
+    exit 1
+fi
 TOOLS_DIR="/home/$CTF_USER/tools"
 VENV_DIR="/home/$CTF_USER/venv"
 

@@ -172,14 +172,25 @@ run_installer() {
         bash /tmp/ctftools-test/install_ctf.sh >/tmp/ctf-test/install.log 2>&1
 }
 
+run_installer_from_stdin() {
+    (
+        cd /tmp/ctftools-test
+        CTF_USER=ctf CTF_PASS=ctf \
+            PATH="/tmp/ctf-test/mockbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+            bash < install_ctf.sh
+    ) >/tmp/ctf-test/install.log 2>&1
+}
+
 setup_fixture
 
 # A real parse check happens before entering the mocked execution path.
 bash -n /tmp/ctftools-test/install_ctf.sh || fail "install_ctf.sh has invalid Bash syntax"
 
-run_installer || {
+# The curl-pipe path must work with environment variables and no .env file.
+rm /tmp/ctftools-test/.env
+run_installer_from_stdin || {
     cat /tmp/ctf-test/install.log >&2
-    fail "installer did not complete in the isolated smoke environment"
+    fail "stdin installer did not accept CTF_USER/CTF_PASS without .env"
 }
 
 assert_file_executable /home/ctf/tools/ghidra
@@ -197,6 +208,7 @@ assert_log_contains "sha256sum /tmp/dirbuster.zip"
 assert_log_contains "sha256sum /tmp/rockyou.txt.gz"
 
 # A second run must remain successful and must not duplicate shell setup.
+printf 'CTF_USER=ctf\nCTF_PASS=test-only\n' > /tmp/ctftools-test/.env
 run_installer || fail "installer is not idempotent on a second run"
 [[ "$(grep -Fc '# CTF tools setup' /home/ctf/.bashrc)" == "1" ]] \
     || fail "installer duplicated the .bashrc setup block"
