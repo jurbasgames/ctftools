@@ -11,7 +11,7 @@ jobs:
   linux-installer:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check Bash syntax
         run: bash -n install_ctf.sh make_bundle.sh uninstall_ctf.sh scan.sh deploy.sh
       - name: Run ShellCheck
@@ -22,7 +22,7 @@ jobs:
   windows-installer:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Validate with Windows PowerShell 5.1
         shell: powershell
         run: ./tests/test_install_ctf_windows.ps1
