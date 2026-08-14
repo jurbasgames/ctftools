@@ -81,7 +81,8 @@ chown "$CTF_USER:$CTF_USER" "$TOOLS_DIR"
 # ── 2. System packages ────────────────────────────────────────────────────────
 info "Installing apt packages..."
 apt-get update -qq
-apt-get install -y \
+printf '%s\n' 'wireshark-common wireshark-common/install-setuid boolean true' | debconf-set-selections
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gdb git wget curl unzip xz-utils \
     python3 python3-pip python3-venv \
     libimage-exiftool-perl \
@@ -89,7 +90,8 @@ apt-get install -y \
     wireshark tshark \
     steghide gzip \
     libssl-dev zlib1g-dev libbz2-dev libgmp-dev
-ok "apt packages installed"
+usermod -aG wireshark "$CTF_USER"
+ok "apt packages installed; $CTF_USER can capture packets via the wireshark group"
 
 # ── 3. pwndbg ─────────────────────────────────────────────────────────────────
 PWNDBG_DIR="$TOOLS_DIR/pwndbg"

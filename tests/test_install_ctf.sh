@@ -50,8 +50,14 @@ setup_fixture() {
 printf 'apt-get %s\n' "$*" >> /tmp/ctf-test/commands.log
 EOF
 
+    cat > /tmp/ctf-test/mockbin/debconf-set-selections <<'EOF'
+#!/usr/bin/env bash
+printf 'debconf-set-selections %s\n' "$(cat)" >> /tmp/ctf-test/commands.log
+EOF
+
     cat > /tmp/ctf-test/mockbin/id <<'EOF'
 #!/usr/bin/env bash
+[[ "${1:-}" == "ctf" ]] && [[ -f /tmp/ctf-test/user-exists ]] && exit 0
 [[ "${1:-}" == "ctf" ]] && exit 1
 exec /usr/bin/id "$@"
 EOF
@@ -61,6 +67,12 @@ EOF
 printf 'useradd %s\n' "$*" >> /tmp/ctf-test/commands.log
 mkdir -p /home/ctf
 : > /home/ctf/.bashrc
+touch /tmp/ctf-test/user-exists
+EOF
+
+    cat > /tmp/ctf-test/mockbin/usermod <<'EOF'
+#!/usr/bin/env bash
+printf 'usermod %s\n' "$*" >> /tmp/ctf-test/commands.log
 EOF
 
     cat > /tmp/ctf-test/mockbin/chpasswd <<'EOF'
@@ -206,10 +218,16 @@ assert_log_contains "pwntools==4.15.0"
 assert_log_contains "ROPgadget==7.7"
 assert_log_contains "sha256sum /tmp/dirbuster.zip"
 assert_log_contains "sha256sum /tmp/rockyou.txt.gz"
+assert_log_contains "debconf-set-selections wireshark-common wireshark-common/install-setuid boolean true"
+assert_log_contains "usermod -aG wireshark ctf"
 
 # A second run must remain successful and must not duplicate shell setup.
 printf 'CTF_USER=ctf\nCTF_PASS=test-only\n' > /tmp/ctftools-test/.env
 run_installer || fail "installer is not idempotent on a second run"
+[[ "$(grep -Fc 'useradd -m -s /bin/bash ctf' /tmp/ctf-test/commands.log)" == "1" ]] \
+    || fail "installer recreated the existing ctf user"
+[[ "$(grep -Fc 'chpasswd' /tmp/ctf-test/commands.log)" == "2" ]] \
+    || fail "installer did not update the existing ctf user password"
 [[ "$(grep -Fc '# CTF tools setup' /home/ctf/.bashrc)" == "1" ]] \
     || fail "installer duplicated the .bashrc setup block"
 
