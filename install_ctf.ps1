@@ -187,6 +187,21 @@ function Invoke-CheckedCommand {
     }
 }
 
+function Find-WingetInstalledVersion {
+    param(
+        [string]$ListOutput,
+        [string]$PackageId
+    )
+
+    $plainOutput = [regex]::Replace($ListOutput, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+    $escapedId = [regex]::Escape($PackageId)
+    $match = [regex]::Match($plainOutput, "(?m)^\s*.*?\s+$escapedId\s+(\S+)")
+    if ($match.Success) {
+        return $match.Groups[1].Value
+    }
+    return $null
+}
+
 function Install-WingetPackage {
     param([pscustomobject]$Package)
 
@@ -197,8 +212,11 @@ function Install-WingetPackage {
         return
     }
 
-    $listOutput = (& winget.exe list --id $Package.Id --exact --accept-source-agreements 2>&1 | Out-String)
-    $hasPinnedVersion = $LASTEXITCODE -eq 0 -and $listOutput.Contains($Package.Version)
+    $listOutput = (& winget.exe list --id $Package.Id --exact --source winget `
+        --accept-source-agreements --disable-interactivity 2>&1 | Out-String)
+    $listExitCode = $LASTEXITCODE
+    $installedVersion = Find-WingetInstalledVersion -ListOutput $listOutput -PackageId $Package.Id
+    $hasPinnedVersion = $listExitCode -eq 0 -and $installedVersion -eq $Package.Version
     if ($hasPinnedVersion -and -not $script:ForceInstall) {
         Write-Skip $Package.Name
         return

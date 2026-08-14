@@ -91,6 +91,22 @@ $assetPath = Get-VerifiedAsset -Asset $Assets.Ffuf -Label 'ffuf return-type test
 Assert-True ($assetPath -is [string]) 'Get-VerifiedAsset returned log records mixed with the path'
 Assert-True ($assetPath.EndsWith('ffuf_2.2.1_windows_amd64.zip')) 'Get-VerifiedAsset returned the wrong path'
 
+# Winget shows both installed and available versions; parse the installed column only.
+$wingetUpgradeOutput = @'
+Name        Id                    Version  Available  Source
+-----------------------------------------------------------
+Python 3.12 Python.Python.3.12    3.12.9   3.12.10   winget
+'@
+$parsedVersion = Find-WingetInstalledVersion -ListOutput $wingetUpgradeOutput -PackageId 'Python.Python.3.12'
+Assert-True ($parsedVersion -eq '3.12.9') "winget parser confused Available with installed version: $parsedVersion"
+$wingetPinnedOutput = @'
+Name        Id                    Version  Source
+------------------------------------------------
+Python 3.12 Python.Python.3.12    3.12.10  winget
+'@
+$parsedPinnedVersion = Find-WingetInstalledVersion -ListOutput $wingetPinnedOutput -PackageId 'Python.Python.3.12'
+Assert-True ($parsedPinnedVersion -eq '3.12.10') "winget parser missed the installed pinned version: $parsedPinnedVersion"
+
 # Exercise resource thresholds with deterministic CIM/drive data.
 $script:MockTotalRamBytes = 5GB
 $script:MockFreeRamKB = 3GB / 1KB
