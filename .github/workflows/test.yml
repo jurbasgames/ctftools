@@ -1,0 +1,38 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-installer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: bash -n install_ctf.sh make_bundle.sh uninstall_ctf.sh scan.sh deploy.sh
+      - name: Run ShellCheck
+        run: shellcheck -x install_ctf.sh make_bundle.sh tests/test_install_ctf.sh
+      - name: Run isolated Linux installer smoke test
+        run: bash tests/test_install_ctf.sh
+
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tests/test_install_ctf_windows.ps1
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+          $findings = @()
+          $findings += Invoke-ScriptAnalyzer -Path ./install_ctf.ps1 -Severity Warning,Error
+          $findings += Invoke-ScriptAnalyzer -Path ./tests/test_install_ctf_windows.ps1 -Severity Warning,Error
+          $findings | Format-Table -AutoSize
+          if ($findings.Count -gt 0) { exit 1 }

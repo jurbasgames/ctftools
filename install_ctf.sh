@@ -4,10 +4,13 @@
 # Run with: sudo bash install_ctf.sh
 
 set -euo pipefail
+export PIP_NO_CACHE_DIR=1
+export MAKEFLAGS="-j2"
 
 # ── Config ──────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    # shellcheck source=/dev/null
     source "$SCRIPT_DIR/.env"
 else
     echo "[!] .env file not found at $SCRIPT_DIR/.env"
@@ -23,13 +26,18 @@ GHIDRA_VER="12.1.2"
 GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip"
 PWNDBG_TAG="2026.07.29"
 PWNTOOLS_VER="4.15.0"
-PYCRYPTODOME_VER="latest"
+# pycryptodome: latest (no pin needed — stable API)
 ROPGADGET_VER="7.7"
 FFUF_VER="2.2.1"
 FFUF_URL="https://github.com/ffuf/ffuf/releases/download/v${FFUF_VER}/ffuf_${FFUF_VER}_linux_amd64.tar.gz"
 JOHN_VER="1.9.0-jumbo-1"
 JOHN_URL="https://www.openwall.com/john/k/john-${JOHN_VER}.tar.xz"
 BURP_URL="https://portswigger.net/burp/releases/download?product=community&type=Jar"
+DIRBUSTER_VER="1.0-RC1"
+DIRBUSTER_URL="https://downloads.sourceforge.net/project/dirbuster/DirBuster%20%28jar%20%2B%20lists%29/${DIRBUSTER_VER}/DirBuster-${DIRBUSTER_VER}.zip"
+DIRBUSTER_SHA256="da80d17bd363bc60d3e7216a3c43329617cbd620ac55e55e2751bd3177d09ea1"
+ROCKYOU_URL="https://gitlab.com/kalilinux/packages/wordlists/-/raw/kali/master/rockyou.txt.gz"
+ROCKYOU_SHA256="ded2d962815e1256df8f3a0d25173c4b21b6eee636117c36999246725a6d8f9f"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 info()  { echo "[*] $*"; }
@@ -37,6 +45,17 @@ ok()    { echo "[+] $*"; }
 skip()  { echo "[-] $* — skipping (already done)"; }
 
 as_ctf() { sudo -u "$CTF_USER" "$@"; }
+
+verify_sha256() {
+    local file="$1" expected="$2" actual
+    actual=$(sha256sum "$file" | cut -d' ' -f1)
+    if [[ "$actual" != "$expected" ]]; then
+        echo "[!] SHA256 mismatch for $file" >&2
+        echo "    expected: $expected" >&2
+        echo "    actual:   $actual" >&2
+        exit 1
+    fi
+}
 
 # ── 0. Root check ─────────────────────────────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
@@ -67,7 +86,7 @@ apt-get install -y \
     libimage-exiftool-perl \
     openjdk-21-jdk \
     wireshark tshark \
-    steghide \
+    steghide gzip \
     libssl-dev zlib1g-dev libbz2-dev libgmp-dev
 ok "apt packages installed"
 
@@ -146,8 +165,8 @@ else
 fi
 
 info "Installing pwntools ${PWNTOOLS_VER}, pycryptodome, ROPgadget ${ROPGADGET_VER}..."
-as_ctf "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-as_ctf "$VENV_DIR/bin/pip" install --quiet \
+as_ctf "$VENV_DIR/bin/pip" install --quiet --no-cache-dir --upgrade pip
+as_ctf "$VENV_DIR/bin/pip" install --quiet --no-cache-dir \
     "pwntools==${PWNTOOLS_VER}" \
     pycryptodome \
     "ROPgadget==${ROPGADGET_VER}"
@@ -174,7 +193,7 @@ else
 fi
 
 # ── 8. John the Ripper (jumbo) ────────────────────────────────────────────────
-JOHN_DIR="$TOOLS_DIR/john"
+JOHN_DIR="$TOOLS_DIR/john-jumbo"
 JOHN_RUN="$JOHN_DIR/run/john"
 info "Installing John the Ripper ${JOHN_VER}..."
 if [[ -x "$JOHN_RUN" ]]; then
@@ -209,7 +228,65 @@ EOF
     ok "John the Ripper ${JOHN_VER} installed"
 fi
 
-# ── 9. Configure .bashrc ──────────────────────────────────────────────────────
+# ── 9. DirBuster ──────────────────────────────────────────────────────────────
+DIRBUSTER_DIR="$TOOLS_DIR/dirbuster-app"
+DIRBUSTER_JAR="$DIRBUSTER_DIR/DirBuster-${DIRBUSTER_VER}.jar"
+DIRBUSTER_BIN="$TOOLS_DIR/dirbuster"
+info "Installing DirBuster ${DIRBUSTER_VER}..."
+if [[ -f "$DIRBUSTER_JAR" ]]; then
+    skip "DirBuster ${DIRBUSTER_VER} already exists at $DIRBUSTER_DIR"
+else
+    if [[ -f "$SCRIPT_DIR/downloads/dirbuster.zip" ]]; then
+        info "Using bundled downloads/dirbuster.zip..."
+        cp "$SCRIPT_DIR/downloads/dirbuster.zip" /tmp/dirbuster.zip
+    else
+        info "Downloading DirBuster ${DIRBUSTER_VER}..."
+        wget -q --show-progress -O /tmp/dirbuster.zip "$DIRBUSTER_URL"
+    fi
+    verify_sha256 /tmp/dirbuster.zip "$DIRBUSTER_SHA256"
+
+    DIRBUSTER_TMP=$(mktemp -d)
+    unzip -q /tmp/dirbuster.zip -d "$DIRBUSTER_TMP"
+    rm /tmp/dirbuster.zip
+    mv "$DIRBUSTER_TMP/DirBuster-${DIRBUSTER_VER}" "$DIRBUSTER_DIR"
+    rmdir "$DIRBUSTER_TMP"
+    chown -R "$CTF_USER:$CTF_USER" "$DIRBUSTER_DIR"
+    ok "DirBuster ${DIRBUSTER_VER} installed"
+fi
+
+cat > "$DIRBUSTER_BIN" <<'EOF'
+#!/bin/bash
+BASE="$(dirname "$(readlink -f "$0")")"
+exec java -jar "$BASE/dirbuster-app/DirBuster-1.0-RC1.jar" "$@"
+EOF
+chmod +x "$DIRBUSTER_BIN"
+chown "$CTF_USER:$CTF_USER" "$DIRBUSTER_BIN"
+
+# ── 10. rockyou.txt ───────────────────────────────────────────────────────────
+WORDLISTS_DIR="$TOOLS_DIR/wordlists"
+ROCKYOU_TXT="$WORDLISTS_DIR/rockyou.txt"
+info "Installing rockyou.txt..."
+if [[ -s "$ROCKYOU_TXT" ]]; then
+    skip "rockyou.txt already exists at $ROCKYOU_TXT"
+else
+    if [[ -f "$SCRIPT_DIR/downloads/rockyou.txt.gz" ]]; then
+        info "Using bundled downloads/rockyou.txt.gz..."
+        cp "$SCRIPT_DIR/downloads/rockyou.txt.gz" /tmp/rockyou.txt.gz
+    else
+        info "Downloading rockyou.txt from Kali wordlists..."
+        wget -q --show-progress -O /tmp/rockyou.txt.gz "$ROCKYOU_URL"
+    fi
+    verify_sha256 /tmp/rockyou.txt.gz "$ROCKYOU_SHA256"
+
+    mkdir -p "$WORDLISTS_DIR"
+    gzip -dc /tmp/rockyou.txt.gz > "$ROCKYOU_TXT.part"
+    mv "$ROCKYOU_TXT.part" "$ROCKYOU_TXT"
+    rm /tmp/rockyou.txt.gz
+    chown -R "$CTF_USER:$CTF_USER" "$WORDLISTS_DIR"
+    ok "rockyou.txt installed at $ROCKYOU_TXT"
+fi
+
+# ── 11. Configure .bashrc ─────────────────────────────────────────────────────
 BASHRC="/home/$CTF_USER/.bashrc"
 MARKER="# CTF tools setup"
 info "Configuring .bashrc..."
@@ -225,8 +302,10 @@ EOF
     ok ".bashrc configured"
 fi
 
-# ── 10. Final ownership fix ───────────────────────────────────────────────────
+# ── 12. Final ownership fix ───────────────────────────────────────────────────
 chown -R "$CTF_USER:$CTF_USER" "/home/$CTF_USER"
+apt-get clean
+rm -rf /var/lib/apt/lists/*
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
@@ -246,6 +325,8 @@ echo "    tshark --version"
 echo "    steghide --help"
 echo "    john --list=build-info"
 echo "    ffuf -V"
+echo "    dirbuster -h"
+echo "    wc -l ~/tools/wordlists/rockyou.txt"
 echo "    ghidra &"
 echo "    burpsuite &"
 echo "================================================================"
