@@ -121,7 +121,6 @@ case "$url" in
         exit 8
         ;;
     https://sourceforge.net/projects/ghidra.mirror/*)
-        [[ "${CTF_TEST_GHIDRA_ALL_FAIL:-0}" != "1" ]] || exit 9
         printf 'test ghidra zip\n' > "$dest"
         ;;
     *)
@@ -245,8 +244,7 @@ EOF
 }
 
 run_installer() {
-    CTF_TEST_GHIDRA_ALL_FAIL="${CTF_TEST_GHIDRA_ALL_FAIL:-0}" \
-        PATH="/tmp/ctf-test/mockbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    PATH="/tmp/ctf-test/mockbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         bash /tmp/ctftools-test/install_ctf.sh >/tmp/ctf-test/install.log 2>&1
 }
 
@@ -271,7 +269,7 @@ run_installer_from_stdin || {
     fail "stdin installer did not accept CTF_USER/CTF_PASS without .env"
 }
 
-assert_file_executable /home/ctf/tools/ghidra
+[[ ! -e /home/ctf/tools/ghidra ]] || fail "Ghidra installation should be commented out"
 assert_file_executable /home/ctf/tools/burpsuite
 assert_file_executable /home/ctf/tools/ffuf
 assert_file_executable /home/ctf/tools/john
@@ -280,10 +278,13 @@ assert_file_executable /home/ctf/tools/dirbuster
     || fail "expected non-empty rockyou.txt"
 
 assert_log_contains "git clone --depth=1 --branch 2026.07.29"
-assert_log_contains "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip"
-assert_log_contains "https://sourceforge.net/projects/ghidra.mirror/files/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip/download"
-assert_log_contains "sha256sum /tmp/ghidra.zip.part"
-[[ ! -e /tmp/ghidra.zip.part ]] || fail "installer left a partial Ghidra download behind"
+if grep -Fq 'NationalSecurityAgency/ghidra/releases/download' /tmp/ctf-test/commands.log \
+        || grep -Fq 'sourceforge.net/projects/ghidra.mirror' /tmp/ctf-test/commands.log; then
+    fail "installer attempted to download Ghidra"
+fi
+if grep -Fq '    ghidra &' /tmp/ctf-test/install.log; then
+    fail "installer suggested launching commented-out Ghidra"
+fi
 assert_log_contains "pwntools==4.15.0"
 assert_log_contains "ROPgadget==7.7"
 assert_log_contains "sha256sum /tmp/dirbuster.zip"
@@ -316,22 +317,6 @@ run_installer || fail "installer is not idempotent on a second run"
 [[ ! -e /home/ctf/tools/burpsuite.jar.part ]] \
     || fail "installer left a partial Burp download behind"
 assert_log_contains "sudo-user ctf"
-
-# If both Ghidra sources fail, only Ghidra is skipped and the installer keeps
-# the remaining tools usable.
-rm -rf /home/ctf/tools/ghidra_12.1.2_PUBLIC /home/ctf/tools/ghidra
-if ! CTF_TEST_GHIDRA_ALL_FAIL=1 run_installer; then
-    cat /tmp/ctf-test/install.log >&2
-    fail "installer stopped when all Ghidra sources failed"
-fi
-[[ ! -e /home/ctf/tools/ghidra ]] || fail "installer created a Ghidra wrapper after all downloads failed"
-assert_file_executable /home/ctf/tools/ffuf
-assert_file_executable /home/ctf/tools/john
-grep -F '[!] Ghidra download failed from all sources; continuing without Ghidra' /tmp/ctf-test/install.log >/dev/null \
-    || fail "installer did not report that Ghidra was skipped"
-if grep -Fq '    ghidra &' /tmp/ctf-test/install.log; then
-    fail "installer suggested launching Ghidra after skipping it"
-fi
 
 # The final verification must fail closed and identify a broken CLI.
 if CTF_VERIFY_FAIL=gdb run_installer; then

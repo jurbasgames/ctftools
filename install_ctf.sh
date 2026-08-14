@@ -23,10 +23,10 @@ TOOLS_DIR="/home/$CTF_USER/tools"
 VENV_DIR="/home/$CTF_USER/venv"
 
 # ── Pinned versions ──────────────────────────────────────────────────────────
-GHIDRA_VER="12.1.2"
-GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip"
-GHIDRA_FALLBACK_URL="https://sourceforge.net/projects/ghidra.mirror/files/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip/download"
-GHIDRA_SHA256="b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d"
+# GHIDRA_VER="12.1.2"
+# GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip"
+# GHIDRA_FALLBACK_URL="https://sourceforge.net/projects/ghidra.mirror/files/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip/download"
+# GHIDRA_SHA256="b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d"
 PWNDBG_TAG="2026.07.29"
 PWNTOOLS_VER="4.15.0"
 # pycryptodome: latest (no pin needed — stable API)
@@ -131,6 +131,8 @@ else
 fi
 
 # ── 4. Ghidra ─────────────────────────────────────────────────────────────────
+# Temporarily disabled: downloads did not work reliably in the lab.
+: <<'GHIDRA_INSTALL_DISABLED'
 info "Installing Ghidra ${GHIDRA_VER}..."
 if [[ -n "$(find "$TOOLS_DIR" -maxdepth 1 -type d -name "ghidra_*" 2>/dev/null)" ]]; then
     skip "Ghidra already installed in $TOOLS_DIR"
@@ -189,6 +191,7 @@ EOF
         echo "[!] Ghidra download failed from all sources; continuing without Ghidra" >&2
     fi
 fi
+GHIDRA_INSTALL_DISABLED
 
 # ── 5. Burp Suite Community ───────────────────────────────────────────────────
 BURP_JAR="$TOOLS_DIR/burpsuite.jar"
