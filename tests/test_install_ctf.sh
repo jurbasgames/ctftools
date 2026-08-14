@@ -258,7 +258,9 @@ assert_log_contains "ROPgadget==7.7"
 assert_log_contains "sha256sum /tmp/dirbuster.zip"
 assert_log_contains "sha256sum /tmp/rockyou.txt.gz"
 assert_log_contains "debconf-set-selections wireshark-common wireshark-common/install-setuid boolean true"
-assert_log_contains "usermod -aG wireshark ctf"
+if grep -Fq "usermod -aG wireshark ctf" /tmp/ctf-test/commands.log; then
+    fail "installer added ctf to the wireshark group"
+fi
 grep -F '[+] CLI verification passed for ctf' /tmp/ctf-test/install.log >/dev/null \
     || fail "installer did not run the final CLI verification as ctf"
 

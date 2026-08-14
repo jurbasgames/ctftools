@@ -112,8 +112,8 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
     wireshark tshark \
     steghide gzip \
     libssl-dev zlib1g-dev libbz2-dev libgmp-dev
-usermod -aG wireshark "$CTF_USER"
-ok "apt packages installed; $CTF_USER can capture packets via the wireshark group"
+# usermod -aG wireshark "$CTF_USER"
+ok "apt packages installed"
 
 # ── 3. pwndbg ─────────────────────────────────────────────────────────────────
 PWNDBG_DIR="$TOOLS_DIR/pwndbg"
@@ -371,7 +371,6 @@ info "Verifying installed tools as '$CTF_USER'..."
 VERIFY_FAILURES=0
 VERIFY_LOG=$(mktemp)
 
-verify_cli "Wireshark capture group" bash -c "id -nG \"\$USER\" | tr ' ' '\\n' | grep -Fxq wireshark"
 verify_cli "GDB" gdb --version
 verify_cli "pwndbg" gdb -q -batch -ex 'pi import pwndbg'
 verify_cli "ExifTool" exiftool -ver
