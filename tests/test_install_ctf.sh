@@ -90,6 +90,8 @@ EOF
     cat > /tmp/ctf-test/mockbin/sudo <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-}" == "-u" ]] || exit 2
+[[ "${2:-}" == "ctf" ]] || exit 3
+printf 'sudo-user %s\n' "$2" >> /tmp/ctf-test/commands.log
 shift 2
 "$@"
 EOF
@@ -189,6 +191,9 @@ printf '%s %s\n' "$(basename "$0")" "$*" >> /tmp/ctf-test/commands.log
 if [[ "${CTF_VERIFY_FAIL:-}" == "$(basename "$0")" ]]; then
     exit 42
 fi
+if [[ "$(basename "$0")" == "jar" && "${1:-}" == "tf" && "$({ cat "$2" 2>/dev/null || true; })" == 'corrupt jar' ]]; then
+    exit 43
+fi
 exit 0
 EOF
     done
@@ -264,6 +269,7 @@ cat > /home/ctf/tools/john <<'EOF'
 exec "$(dirname "$(readlink -f "$0")")/john/run/john" "$@"
 EOF
 chmod +x /home/ctf/tools/john
+printf 'corrupt jar\n' > /home/ctf/tools/burpsuite.jar
 printf 'CTF_USER=ctf\nCTF_PASS=test-only\n' > /tmp/ctftools-test/.env
 run_installer || fail "installer is not idempotent on a second run"
 [[ "$(grep -Fc 'useradd -m -s /bin/bash ctf' /tmp/ctf-test/commands.log)" == "1" ]] \
@@ -272,6 +278,11 @@ run_installer || fail "installer is not idempotent on a second run"
     || fail "installer did not update the existing ctf user password"
 [[ "$(grep -Fc '# CTF tools setup' /home/ctf/.bashrc)" == "1" ]] \
     || fail ".bashrc setup marker was duplicated"
+[[ "$(< /home/ctf/tools/burpsuite.jar)" == 'test jar' ]] \
+    || fail "installer did not replace the corrupt Burp JAR"
+[[ ! -e /home/ctf/tools/burpsuite.jar.part ]] \
+    || fail "installer left a partial Burp download behind"
+assert_log_contains "sudo-user ctf"
 
 # The final verification must fail closed and identify a broken CLI.
 if CTF_VERIFY_FAIL=gdb run_installer; then

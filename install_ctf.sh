@@ -156,19 +156,31 @@ fi
 
 # ── 5. Burp Suite Community ───────────────────────────────────────────────────
 BURP_JAR="$TOOLS_DIR/burpsuite.jar"
+BURP_PART="$BURP_JAR.part"
 info "Installing Burp Suite Community..."
-if [[ -f "$BURP_JAR" ]]; then
+if [[ -f "$BURP_JAR" ]] && jar tf "$BURP_JAR" >/dev/null 2>&1; then
     skip "Burp Suite JAR already exists at $BURP_JAR"
 else
+    if [[ -f "$BURP_JAR" ]]; then
+        info "Existing Burp Suite JAR is invalid; replacing it..."
+    fi
+    rm -f "$BURP_PART"
     if [[ -f "$SCRIPT_DIR/downloads/burpsuite.jar" ]]; then
         info "Using bundled downloads/burpsuite.jar..."
-        cp "$SCRIPT_DIR/downloads/burpsuite.jar" "$BURP_JAR"
+        cp "$SCRIPT_DIR/downloads/burpsuite.jar" "$BURP_PART"
     else
         info "Downloading Burp Suite Community JAR..."
         wget -q --show-progress \
-            -O "$BURP_JAR" \
+            -O "$BURP_PART" \
             "$BURP_URL"
     fi
+
+    if ! jar tf "$BURP_PART" >/dev/null 2>&1; then
+        rm -f "$BURP_PART"
+        echo "[!] Invalid Burp Suite JAR" >&2
+        exit 1
+    fi
+    mv -f "$BURP_PART" "$BURP_JAR"
 
     # Wrapper script so 'burpsuite' is on PATH
     cat > "$TOOLS_DIR/burpsuite" <<'EOF'
