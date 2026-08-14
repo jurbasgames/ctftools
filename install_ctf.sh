@@ -25,6 +25,8 @@ VENV_DIR="/home/$CTF_USER/venv"
 # ── Pinned versions ──────────────────────────────────────────────────────────
 GHIDRA_VER="12.1.2"
 GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip"
+GHIDRA_FALLBACK_URL="https://sourceforge.net/projects/ghidra.mirror/files/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip/download"
+GHIDRA_SHA256="b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d"
 PWNDBG_TAG="2026.07.29"
 PWNTOOLS_VER="4.15.0"
 # pycryptodome: latest (no pin needed — stable API)
@@ -76,7 +78,7 @@ verify_sha256() {
         echo "[!] SHA256 mismatch for $file" >&2
         echo "    expected: $expected" >&2
         echo "    actual:   $actual" >&2
-        exit 1
+        return 1
     fi
 }
 
@@ -133,25 +135,59 @@ info "Installing Ghidra ${GHIDRA_VER}..."
 if [[ -n "$(find "$TOOLS_DIR" -maxdepth 1 -type d -name "ghidra_*" 2>/dev/null)" ]]; then
     skip "Ghidra already installed in $TOOLS_DIR"
 else
+    GHIDRA_ZIP="/tmp/ghidra.zip"
+    GHIDRA_PART="${GHIDRA_ZIP}.part"
+    GHIDRA_READY=0
+    rm -f "$GHIDRA_ZIP" "$GHIDRA_PART"
+
     if [[ -f "$SCRIPT_DIR/downloads/ghidra.zip" ]]; then
         info "Using bundled downloads/ghidra.zip..."
-        cp "$SCRIPT_DIR/downloads/ghidra.zip" /tmp/ghidra.zip
-    else
-        info "Downloading Ghidra ${GHIDRA_VER} from GitHub..."
-        wget -q --show-progress -O /tmp/ghidra.zip "$GHIDRA_URL"
+        cp "$SCRIPT_DIR/downloads/ghidra.zip" "$GHIDRA_PART"
+        if verify_sha256 "$GHIDRA_PART" "$GHIDRA_SHA256"; then
+            GHIDRA_READY=1
+        else
+            echo "[!] Bundled Ghidra archive is invalid; trying network sources" >&2
+            rm -f "$GHIDRA_PART"
+        fi
     fi
-    unzip -q /tmp/ghidra.zip -d "$TOOLS_DIR"
-    rm /tmp/ghidra.zip
 
-    # Wrapper script — finds ghidraRun inside whichever versioned dir was extracted
-    cat > "$TOOLS_DIR/ghidra" <<'EOF'
+    if (( ! GHIDRA_READY )); then
+        info "Downloading Ghidra ${GHIDRA_VER} from GitHub..."
+        if wget -q --show-progress --timeout=30 --tries=1 -O "$GHIDRA_PART" "$GHIDRA_URL" \
+                && verify_sha256 "$GHIDRA_PART" "$GHIDRA_SHA256"; then
+            GHIDRA_READY=1
+        else
+            rm -f "$GHIDRA_PART"
+            info "GitHub download failed; trying SourceForge mirror..."
+        fi
+    fi
+
+    if (( ! GHIDRA_READY )); then
+        if wget -q --show-progress --timeout=30 --tries=1 -O "$GHIDRA_PART" "$GHIDRA_FALLBACK_URL" \
+                && verify_sha256 "$GHIDRA_PART" "$GHIDRA_SHA256"; then
+            GHIDRA_READY=1
+        else
+            rm -f "$GHIDRA_PART"
+        fi
+    fi
+
+    if (( GHIDRA_READY )); then
+        mv -f "$GHIDRA_PART" "$GHIDRA_ZIP"
+        unzip -q "$GHIDRA_ZIP" -d "$TOOLS_DIR"
+        rm -f "$GHIDRA_ZIP"
+
+        # Wrapper script — finds ghidraRun inside whichever versioned dir was extracted
+        cat > "$TOOLS_DIR/ghidra" <<'EOF'
 #!/bin/bash
 GHIDRA_RUN=$(find "$(dirname "$(readlink -f "$0")")" -maxdepth 2 -name "ghidraRun" | head -1)
 exec "$GHIDRA_RUN" "$@"
 EOF
-    chmod +x "$TOOLS_DIR/ghidra"
-    chown -R "$CTF_USER:$CTF_USER" "$TOOLS_DIR"/ghidra_* "$TOOLS_DIR/ghidra"
-    ok "Ghidra ${GHIDRA_VER} installed in $TOOLS_DIR"
+        chmod +x "$TOOLS_DIR/ghidra"
+        chown -R "$CTF_USER:$CTF_USER" "$TOOLS_DIR"/ghidra_* "$TOOLS_DIR/ghidra"
+        ok "Ghidra ${GHIDRA_VER} installed in $TOOLS_DIR"
+    else
+        echo "[!] Ghidra download failed from all sources; continuing without Ghidra" >&2
+    fi
 fi
 
 # ── 5. Burp Suite Community ───────────────────────────────────────────────────
@@ -382,7 +418,11 @@ verify_cli "PyCryptodome" "$VENV_DIR/bin/python" -c 'from Crypto.Cipher import A
 verify_cli "ROPgadget" "$VENV_DIR/bin/ROPgadget" --version
 verify_cli "ffuf" "$TOOLS_DIR/ffuf" -V
 verify_cli "John the Ripper" "$TOOLS_DIR/john" --list=build-info
-verify_cli "Ghidra launcher" bash -c "targets=(\"\$1\"/ghidra*/ghidraRun); test -x \"\${targets[0]}\" && test -x \"\$1/ghidra\"" _ "$TOOLS_DIR"
+if [[ -x "$TOOLS_DIR/ghidra" ]] && compgen -G "$TOOLS_DIR/ghidra*/ghidraRun" >/dev/null; then
+    verify_cli "Ghidra launcher" bash -c "targets=(\"\$1\"/ghidra*/ghidraRun); test -x \"\${targets[0]}\" && test -x \"\$1/ghidra\"" _ "$TOOLS_DIR"
+else
+    info "CLI check skipped: Ghidra is not installed"
+fi
 verify_cli "Burp Suite assets" bash -c "test -x \"\$1/burpsuite\" && jar tf \"\$1/burpsuite.jar\" >/dev/null" _ "$TOOLS_DIR"
 verify_cli "DirBuster assets" bash -c "test -x \"\$1/dirbuster\" && jar tf \"\$1/dirbuster-app/DirBuster-1.0-RC1.jar\" >/dev/null" _ "$TOOLS_DIR"
 verify_cli "rockyou.txt" test -s "$ROCKYOU_TXT"
@@ -417,6 +457,8 @@ echo "    john --list=build-info"
 echo "    ffuf -V"
 echo "    dirbuster -h"
 echo "    wc -l ~/tools/wordlists/rockyou.txt"
-echo "    ghidra &"
+if [[ -x "$TOOLS_DIR/ghidra" ]]; then
+    echo "    ghidra &"
+fi
 echo "    burpsuite &"
 echo "================================================================"
