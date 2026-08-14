@@ -47,6 +47,28 @@ skip()  { echo "[-] $* — skipping (already done)"; }
 
 as_ctf() { sudo -u "$CTF_USER" "$@"; }
 
+as_ctf_cli() {
+    sudo -u "$CTF_USER" env \
+        HOME="/home/$CTF_USER" \
+        USER="$CTF_USER" \
+        LOGNAME="$CTF_USER" \
+        TERM="${TERM:-xterm}" \
+        PATH="$VENV_DIR/bin:$TOOLS_DIR:$PATH" \
+        "$@"
+}
+
+verify_cli() {
+    local label="$1"
+    shift
+    if as_ctf_cli "$@" >"$VERIFY_LOG" 2>&1; then
+        ok "CLI check: $label"
+    else
+        echo "[!] CLI check failed: $label" >&2
+        sed -n '1,10p' "$VERIFY_LOG" >&2
+        VERIFY_FAILURES=$((VERIFY_FAILURES + 1))
+    fi
+}
+
 verify_sha256() {
     local file="$1" expected="$2" actual
     actual=$(sha256sum "$file" | cut -d' ' -f1)
@@ -215,21 +237,45 @@ else
     tar -xf /tmp/john.tar.xz -C "$JOHN_DIR" --strip-components=1
     rm /tmp/john.tar.xz
 
+    # Upstream 8152ac071bce: fix BLAKE2 alignment errors on GCC 11+.
+    JOHN_BLAKE2="$JOHN_DIR/src/blake2.h"
+    OLD_ALIGNMENTS=(
+        "JTR_ALIGN( 64 ) typedef struct __blake2s_state"
+        "JTR_ALIGN( 64 ) typedef struct __blake2b_state"
+        "JTR_ALIGN( 64 ) typedef struct __blake2sp_state"
+        "JTR_ALIGN( 64 ) typedef struct __blake2bp_state"
+    )
+    NEW_ALIGNMENTS=(
+        "typedef struct JTR_ALIGN( 64 ) __blake2s_state"
+        "typedef struct JTR_ALIGN( 64 ) __blake2b_state"
+        "typedef struct JTR_ALIGN( 64 ) __blake2sp_state"
+        "typedef struct JTR_ALIGN( 64 ) __blake2bp_state"
+    )
+    for i in "${!OLD_ALIGNMENTS[@]}"; do
+        count=$(grep -Fc -- "${OLD_ALIGNMENTS[$i]}" "$JOHN_BLAKE2" || true)
+        if [[ "$count" != 1 ]]; then
+            echo "[!] Unexpected John blake2.h: found $count copies of '${OLD_ALIGNMENTS[$i]}'" >&2
+            exit 1
+        fi
+        sed -i "s/${OLD_ALIGNMENTS[$i]}/${NEW_ALIGNMENTS[$i]}/" "$JOHN_BLAKE2"
+    done
+
     (
         cd "$JOHN_DIR/src"
         ./configure --quiet
         make -sj"$(nproc)"
     )
     chown -R "$CTF_USER:$CTF_USER" "$JOHN_DIR"
-
-    # Wrapper so 'john' is on PATH
-    cat > "$TOOLS_DIR/john" <<'EOF'
-#!/bin/bash
-exec "$(dirname "$(readlink -f "$0")")/john/run/john" "$@"
-EOF
-    chmod +x "$TOOLS_DIR/john"
     ok "John the Ripper ${JOHN_VER} installed"
 fi
+
+# Always refresh the wrapper so installations made by older versions recover.
+cat > "$TOOLS_DIR/john" <<'EOF'
+#!/bin/bash
+exec "$(dirname "$(readlink -f "$0")")/john-jumbo/run/john" "$@"
+EOF
+chmod +x "$TOOLS_DIR/john"
+chown "$CTF_USER:$CTF_USER" "$TOOLS_DIR/john"
 
 # ── 9. DirBuster ──────────────────────────────────────────────────────────────
 DIRBUSTER_DIR="$TOOLS_DIR/dirbuster-app"
@@ -307,6 +353,36 @@ fi
 
 # ── 12. Final ownership fix ───────────────────────────────────────────────────
 chown -R "$CTF_USER:$CTF_USER" "/home/$CTF_USER"
+
+# ── 13. Verify the installed CLI as the CTF user ─────────────────────────────
+info "Verifying installed tools as '$CTF_USER'..."
+VERIFY_FAILURES=0
+VERIFY_LOG=$(mktemp)
+
+verify_cli "Wireshark capture group" bash -c "id -nG \"\$USER\" | tr ' ' '\\n' | grep -Fxq wireshark"
+verify_cli "GDB" gdb --version
+verify_cli "pwndbg" gdb -q -batch -ex 'pi import pwndbg'
+verify_cli "ExifTool" exiftool -ver
+verify_cli "TShark" tshark --version
+verify_cli "Steghide" steghide --version
+verify_cli "Java" java -version
+verify_cli "pwntools" "$VENV_DIR/bin/python" -c 'import pwn'
+verify_cli "PyCryptodome" "$VENV_DIR/bin/python" -c 'from Crypto.Cipher import AES'
+verify_cli "ROPgadget" "$VENV_DIR/bin/ROPgadget" --version
+verify_cli "ffuf" "$TOOLS_DIR/ffuf" -V
+verify_cli "John the Ripper" "$TOOLS_DIR/john" --list=build-info
+verify_cli "Ghidra launcher" bash -c "targets=(\"\$1\"/ghidra*/ghidraRun); test -x \"\${targets[0]}\" && test -x \"\$1/ghidra\"" _ "$TOOLS_DIR"
+verify_cli "Burp Suite assets" bash -c "test -x \"\$1/burpsuite\" && jar tf \"\$1/burpsuite.jar\" >/dev/null" _ "$TOOLS_DIR"
+verify_cli "DirBuster assets" bash -c "test -x \"\$1/dirbuster\" && jar tf \"\$1/dirbuster-app/DirBuster-1.0-RC1.jar\" >/dev/null" _ "$TOOLS_DIR"
+verify_cli "rockyou.txt" test -s "$ROCKYOU_TXT"
+
+rm -f "$VERIFY_LOG"
+if (( VERIFY_FAILURES > 0 )); then
+    echo "[!] $VERIFY_FAILURES CLI verification check(s) failed for $CTF_USER" >&2
+    exit 1
+fi
+ok "CLI verification passed for $CTF_USER"
+
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 
@@ -323,9 +399,9 @@ echo "    exiftool -ver"
 echo "    gdb --version"
 echo "    python3 -c \"import pwn; print('pwntools ok')\""
 echo "    python3 -c \"from Crypto.Cipher import AES; print('pycryptodome ok')\""
-echo "    python3 -c \"import ROPgadget; print('ropgadget ok')\""
+echo "    ROPgadget --version"
 echo "    tshark --version"
-echo "    steghide --help"
+echo "    steghide --version"
 echo "    john --list=build-info"
 echo "    ffuf -V"
 echo "    dirbuster -h"

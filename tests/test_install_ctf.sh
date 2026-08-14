@@ -39,7 +39,7 @@ setup_fixture() {
     cp /workspace/install_ctf.sh /tmp/ctftools-test/install_ctf.sh
     printf 'CTF_USER=ctf\nCTF_PASS=test-only\n' > /tmp/ctftools-test/.env
     : > /tmp/ctftools-test/downloads/ghidra.zip
-    : > /tmp/ctftools-test/downloads/burpsuite.jar
+    printf 'test jar\n' > /tmp/ctftools-test/downloads/burpsuite.jar
     : > /tmp/ctftools-test/downloads/ffuf.tar.gz
     : > /tmp/ctftools-test/downloads/john.tar.xz
     : > /tmp/ctftools-test/downloads/dirbuster.zip
@@ -57,6 +57,7 @@ EOF
 
     cat > /tmp/ctf-test/mockbin/id <<'EOF'
 #!/usr/bin/env bash
+[[ "${1:-}" == "-nG" && "${2:-}" == "ctf" ]] && printf 'ctf wireshark\n' && exit 0
 [[ "${1:-}" == "ctf" ]] && [[ -f /tmp/ctf-test/user-exists ]] && exit 0
 [[ "${1:-}" == "ctf" ]] && exit 1
 exec /usr/bin/id "$@"
@@ -112,7 +113,15 @@ if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then
 #!/usr/bin/env bash
 printf 'pip %s\n' "$*" >> /tmp/ctf-test/commands.log
 PIP
-    chmod +x "$venv/bin/pip"
+    cat > "$venv/bin/python" <<'PYTHON'
+#!/usr/bin/env bash
+printf 'venv-python %s\n' "$*" >> /tmp/ctf-test/commands.log
+PYTHON
+    cat > "$venv/bin/ROPgadget" <<'ROPGADGET'
+#!/usr/bin/env bash
+printf 'ROPgadget %s\n' "$*" >> /tmp/ctf-test/commands.log
+ROPGADGET
+    chmod +x "$venv/bin/pip" "$venv/bin/python" "$venv/bin/ROPgadget"
 fi
 EOF
 
@@ -121,7 +130,7 @@ EOF
 dest="${@: -1}"
 if [[ " $* " == *"dirbuster.zip"* ]]; then
     mkdir -p "$dest/DirBuster-1.0-RC1"
-    : > "$dest/DirBuster-1.0-RC1/DirBuster-1.0-RC1.jar"
+    printf 'test jar\n' > "$dest/DirBuster-1.0-RC1/DirBuster-1.0-RC1.jar"
 else
     mkdir -p "$dest/ghidra_12.1.2_PUBLIC"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$dest/ghidra_12.1.2_PUBLIC/ghidraRun"
@@ -149,6 +158,12 @@ else
     done
     mkdir -p "$dest/src" "$dest/run"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$dest/src/configure"
+    printf '%s\n' \
+        'JTR_ALIGN( 64 ) typedef struct __blake2s_state' \
+        'JTR_ALIGN( 64 ) typedef struct __blake2b_state' \
+        'JTR_ALIGN( 64 ) typedef struct __blake2sp_state' \
+        'JTR_ALIGN( 64 ) typedef struct __blake2bp_state' \
+        > "$dest/src/blake2.h"
     printf '#!/usr/bin/env bash\necho John the Ripper 1.9.0-jumbo-1\n' > "$dest/run/john"
     chmod +x "$dest/src/configure" "$dest/run/john"
 fi
@@ -157,7 +172,26 @@ EOF
     cat > /tmp/ctf-test/mockbin/make <<'EOF'
 #!/usr/bin/env bash
 printf 'make %s\n' "$*" >> /tmp/ctf-test/commands.log
+if [[ "$PWD" == */john-jumbo/src ]]; then
+    content=$(<blake2.h)
+    [[ "$content" != *'JTR_ALIGN( 64 ) typedef struct'* ]] || exit 90
+    [[ "$content" == *'typedef struct JTR_ALIGN( 64 ) __blake2s_state'* ]] || exit 91
+    [[ "$content" == *'typedef struct JTR_ALIGN( 64 ) __blake2b_state'* ]] || exit 92
+    [[ "$content" == *'typedef struct JTR_ALIGN( 64 ) __blake2sp_state'* ]] || exit 93
+    [[ "$content" == *'typedef struct JTR_ALIGN( 64 ) __blake2bp_state'* ]] || exit 94
+fi
 EOF
+
+    for command in gdb exiftool tshark steghide java jar; do
+        cat > "/tmp/ctf-test/mockbin/$command" <<'EOF'
+#!/usr/bin/env bash
+printf '%s %s\n' "$(basename "$0")" "$*" >> /tmp/ctf-test/commands.log
+if [[ "${CTF_VERIFY_FAIL:-}" == "$(basename "$0")" ]]; then
+    exit 42
+fi
+exit 0
+EOF
+    done
 
     cat > /tmp/ctf-test/mockbin/gzip <<'EOF'
 #!/usr/bin/env bash
@@ -220,8 +254,16 @@ assert_log_contains "sha256sum /tmp/dirbuster.zip"
 assert_log_contains "sha256sum /tmp/rockyou.txt.gz"
 assert_log_contains "debconf-set-selections wireshark-common wireshark-common/install-setuid boolean true"
 assert_log_contains "usermod -aG wireshark ctf"
+grep -F '[+] CLI verification passed for ctf' /tmp/ctf-test/install.log >/dev/null \
+    || fail "installer did not run the final CLI verification as ctf"
 
-# A second run must remain successful and must not duplicate shell setup.
+# A second run must remain successful, repair an old John wrapper, and avoid
+# duplicating shell setup.
+cat > /home/ctf/tools/john <<'EOF'
+#!/bin/bash
+exec "$(dirname "$(readlink -f "$0")")/john/run/john" "$@"
+EOF
+chmod +x /home/ctf/tools/john
 printf 'CTF_USER=ctf\nCTF_PASS=test-only\n' > /tmp/ctftools-test/.env
 run_installer || fail "installer is not idempotent on a second run"
 [[ "$(grep -Fc 'useradd -m -s /bin/bash ctf' /tmp/ctf-test/commands.log)" == "1" ]] \
@@ -229,6 +271,13 @@ run_installer || fail "installer is not idempotent on a second run"
 [[ "$(grep -Fc 'chpasswd' /tmp/ctf-test/commands.log)" == "2" ]] \
     || fail "installer did not update the existing ctf user password"
 [[ "$(grep -Fc '# CTF tools setup' /home/ctf/.bashrc)" == "1" ]] \
-    || fail "installer duplicated the .bashrc setup block"
+    || fail ".bashrc setup marker was duplicated"
+
+# The final verification must fail closed and identify a broken CLI.
+if CTF_VERIFY_FAIL=gdb run_installer; then
+    fail "installer succeeded even though the GDB CLI check was forced to fail"
+fi
+grep -F '[!] CLI check failed: GDB' /tmp/ctf-test/install.log >/dev/null \
+    || fail "installer did not identify the failed GDB CLI check"
 
 echo "[PASS] install_ctf.sh isolated smoke test"
