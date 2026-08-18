@@ -23,10 +23,10 @@ TOOLS_DIR="/home/$CTF_USER/tools"
 VENV_DIR="/home/$CTF_USER/venv"
 
 # ── Pinned versions ──────────────────────────────────────────────────────────
-# GHIDRA_VER="12.1.2"
-# GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip"
-# GHIDRA_FALLBACK_URL="https://sourceforge.net/projects/ghidra.mirror/files/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip/download"
-# GHIDRA_SHA256="b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d"
+GHIDRA_VER="12.1.2"
+GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip"
+GHIDRA_FALLBACK_URL="https://sourceforge.net/projects/ghidra.mirror/files/Ghidra_${GHIDRA_VER}_build/ghidra_${GHIDRA_VER}_PUBLIC_20260605.zip/download"
+GHIDRA_SHA256="b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d"
 PWNDBG_TAG="2026.07.29"
 PWNTOOLS_VER="4.15.0"
 # pycryptodome: latest (no pin needed — stable API)
@@ -106,11 +106,19 @@ chown "$CTF_USER:$CTF_USER" "$TOOLS_DIR"
 info "Installing apt packages..."
 apt-get update -qq
 printf '%s\n' 'wireshark-common wireshark-common/install-setuid boolean true' | debconf-set-selections
+# openjdk-21 só existe em releases recentes; fallback para o disponível
+JDK_PKG="openjdk-21-jdk"
+if ! apt-cache show "$JDK_PKG" >/dev/null 2>&1; then
+    JDK_PKG="openjdk-17-jdk"
+    apt-cache show "$JDK_PKG" >/dev/null 2>&1 || JDK_PKG="default-jdk"
+fi
+info "JDK package: $JDK_PKG"
+
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
     gdb git wget curl unzip xz-utils \
     python3 python3-pip python3-venv \
     libimage-exiftool-perl \
-    openjdk-21-jdk \
+    "$JDK_PKG" \
     wireshark tshark \
     steghide gzip \
     libssl-dev zlib1g-dev libbz2-dev libgmp-dev
@@ -131,8 +139,6 @@ else
 fi
 
 # ── 4. Ghidra ─────────────────────────────────────────────────────────────────
-# Temporarily disabled: downloads did not work reliably in the lab.
-: <<'GHIDRA_INSTALL_DISABLED'
 info "Installing Ghidra ${GHIDRA_VER}..."
 if [[ -n "$(find "$TOOLS_DIR" -maxdepth 1 -type d -name "ghidra_*" 2>/dev/null)" ]]; then
     skip "Ghidra already installed in $TOOLS_DIR"
@@ -191,7 +197,6 @@ EOF
         echo "[!] Ghidra download failed from all sources; continuing without Ghidra" >&2
     fi
 fi
-GHIDRA_INSTALL_DISABLED
 
 # ── 5. Burp Suite Community ───────────────────────────────────────────────────
 BURP_JAR="$TOOLS_DIR/burpsuite.jar"
