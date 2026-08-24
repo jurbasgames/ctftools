@@ -37,8 +37,9 @@ assert_output_contains() {
 
 create_user_fixture() {
     local user="$1"
-    mkdir -p "/tmp/ctf-uninstall/users" "/tmp/ctf-uninstall/homes/$user"
-    : > "/tmp/ctf-uninstall/users/$user"
+    local home="${2:-/tmp/ctf-uninstall/homes/$user}"
+    mkdir -p "/tmp/ctf-uninstall/users" "$home"
+    printf '%s\n' "$home" > "/tmp/ctf-uninstall/users/$user"
 }
 
 setup_fixture() {
@@ -67,8 +68,20 @@ EOF
 #!/usr/bin/env bash
 [[ "${1:-}" == "passwd" ]] || exit 2
 user="${2:-}"
-[[ -f "/tmp/ctf-uninstall/users/$user" ]] || exit 1
-printf '%s:x:1001:1001::/tmp/ctf-uninstall/homes/%s:/bin/bash\n' "$user" "$user"
+print_user() {
+    local name="$1" home
+    home=$(<"/tmp/ctf-uninstall/users/$name")
+    printf '%s:x:1001:1001::%s:/bin/bash\n' "$name" "$home"
+}
+if [[ -n "$user" ]]; then
+    [[ -f "/tmp/ctf-uninstall/users/$user" ]] || exit 1
+    print_user "$user"
+else
+    shopt -s nullglob
+    for entry in /tmp/ctf-uninstall/users/*; do
+        print_user "$(basename "$entry")"
+    done
+fi
 EOF
 
     cat > /tmp/ctf-uninstall/mockbin/pkill <<'EOF'
@@ -85,8 +98,9 @@ EOF
 #!/usr/bin/env bash
 printf 'userdel %s\n' "$*" >> /tmp/ctf-uninstall/commands.log
 user="${@: -1}"
+home=$(<"/tmp/ctf-uninstall/users/$user")
 rm -f "/tmp/ctf-uninstall/users/$user"
-rm -rf "/tmp/ctf-uninstall/homes/$user"
+rm -rf "$home"
 EOF
 
     chmod +x /tmp/ctf-uninstall/mockbin/*
@@ -125,6 +139,23 @@ env -u CTF_USER \
     >/tmp/ctf-uninstall/output.log 2>&1 \
     || { cat /tmp/ctf-uninstall/output.log >&2; fail ".env fallback uninstall failed"; }
 assert_log_contains "userdel -r -- labctf"
+
+# userdel -r deletes a shared home even when another account still references it.
+# The uninstaller must fail closed before invoking userdel in that case.
+: > /tmp/ctf-uninstall/commands.log
+create_user_fixture alpha /tmp/ctf-uninstall/homes/shared
+create_user_fixture beta /tmp/ctf-uninstall/homes/shared
+if CTF_USER=alpha run_uninstaller; then
+    fail "uninstaller accepted a home shared with another account"
+fi
+assert_output_contains "home directory is shared with: beta"
+[[ -e /tmp/ctf-uninstall/users/alpha && -e /tmp/ctf-uninstall/users/beta ]] \
+    || fail "uninstaller removed an account from a shared-home fixture"
+[[ -d /tmp/ctf-uninstall/homes/shared ]] \
+    || fail "uninstaller removed the shared home"
+if grep -Fq 'userdel ' /tmp/ctf-uninstall/commands.log; then
+    fail "uninstaller called userdel for a shared home"
+fi
 
 # Protected accounts must be rejected before any destructive command.
 : > /tmp/ctf-uninstall/commands.log

@@ -41,6 +41,21 @@ if [[ -z "$TARGET_HOME" || "$TARGET_HOME" == "/" ]]; then
     exit 1
 fi
 
+if ! PASSWD_DB="$(getent passwd)"; then
+    echo "[!] Could not enumerate accounts before removing '$CTF_USER'." >&2
+    exit 1
+fi
+SHARED_HOME_USERS=()
+while IFS=: read -r account _password _uid _gid _gecos account_home _shell; do
+    if [[ "$account" != "$CTF_USER" && "$account_home" == "$TARGET_HOME" ]]; then
+        SHARED_HOME_USERS+=("$account")
+    fi
+done <<< "$PASSWD_DB"
+if (( ${#SHARED_HOME_USERS[@]} > 0 )); then
+    echo "[!] Refusing to remove '$CTF_USER': home directory is shared with: ${SHARED_HOME_USERS[*]}." >&2
+    exit 1
+fi
+
 echo "[*] Removing user '$CTF_USER' and home directory '$TARGET_HOME'..."
 pkill -u "$CTF_USER" 2>/dev/null || true
 sleep 2
