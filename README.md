@@ -44,12 +44,13 @@ Reproducible CTF workstation installers for Linux (Ubuntu/Mint) and Windows 11. 
 |--------|---------|
 | `install_ctf.sh` | Creates `ctf` user and installs all tools |
 | `install_ctf.ps1` | Installs the native Windows 11 toolset; optional WSL2 pwn stack |
-| `uninstall_ctf.sh` | Removes the `ctf` user and all their files |
+| `uninstall_ctf.sh` | Removes the configured CTF user and their home directory |
 | `make_bundle.sh` | Downloads Linux assets, including DirBuster/rockyou, and packs `bundle.tar.gz` |
 | `scan.sh` | Nmap ping scan to find live lab machines, saves last octets to `ips.txt` |
 | `deploy.sh` | Pushes the bundle to all machines in `ips.txt` via SSH and runs the install |
 | `ansible/deploy.yml` | Ansible alternative to `deploy.sh` |
 | `tests/test_install_ctf.sh` | Isolated, mocked Linux smoke/idempotence test |
+| `tests/test_uninstall_ctf.sh` | Isolated Linux uninstaller safety/idempotence test |
 | `tests/test_install_ctf_windows.ps1` | PowerShell syntax and dry-run contract test |
 
 ## Linux configuration
@@ -146,11 +147,22 @@ ROPgadget --help
 
 ## Uninstall
 
+For the default `ctf` user, or the user configured in the neighboring `.env`:
+
 ```bash
 sudo bash uninstall_ctf.sh
 ```
 
-Deletes the `ctf` user and their entire home directory. System packages (gdb, JDK, exiftool, wireshark, steghide, etc.) are left in place.
+To select the same custom user explicitly:
+
+```bash
+sudo env CTF_USER=teamctf bash uninstall_ctf.sh
+```
+
+The script terminates that user's processes, deletes the account and its actual home
+directory, and verifies that both disappeared. It refuses UID 0 and unsafe home paths.
+System packages (gdb, JDK, exiftool, wireshark, steghide, etc.) are intentionally
+left in place because other users may depend on them. Repeated runs are safe no-ops.
 
 ## Mass deployment
 
