@@ -39,6 +39,7 @@ create_user_fixture() {
     local user="$1"
     local home="${2:-/tmp/ctf-uninstall/homes/$user}"
     mkdir -p "/tmp/ctf-uninstall/users" "$home"
+    chown 1001:1001 "$home"
     printf '%s\n' "$home" > "/tmp/ctf-uninstall/users/$user"
 }
 
@@ -148,13 +149,77 @@ create_user_fixture beta /tmp/ctf-uninstall/homes/shared
 if CTF_USER=alpha run_uninstaller; then
     fail "uninstaller accepted a home shared with another account"
 fi
-assert_output_contains "home directory is shared with: beta"
+assert_output_contains "home directory overlaps account 'beta'"
 [[ -e /tmp/ctf-uninstall/users/alpha && -e /tmp/ctf-uninstall/users/beta ]] \
     || fail "uninstaller removed an account from a shared-home fixture"
 [[ -d /tmp/ctf-uninstall/homes/shared ]] \
     || fail "uninstaller removed the shared home"
 if grep -Fq 'userdel ' /tmp/ctf-uninstall/commands.log; then
     fail "uninstaller called userdel for a shared home"
+fi
+
+# Equivalent path spellings must not bypass the shared-home guard.
+: > /tmp/ctf-uninstall/commands.log
+create_user_fixture aliasalpha /tmp/ctf-uninstall/homes/alias-shared
+create_user_fixture aliasbeta /tmp/ctf-uninstall/homes/alias-shared/.
+if CTF_USER=aliasalpha run_uninstaller; then
+    fail "uninstaller accepted an alias of a shared home"
+fi
+assert_output_contains "home directory overlaps account 'aliasbeta'"
+[[ -d /tmp/ctf-uninstall/homes/alias-shared ]] \
+    || fail "uninstaller removed the aliased shared home"
+if grep -Fq 'userdel ' /tmp/ctf-uninstall/commands.log; then
+    fail "uninstaller called userdel for an aliased shared home"
+fi
+
+# A malformed passwd entry must never turn a system top-level directory into
+# a recursive deletion target.
+: > /tmp/ctf-uninstall/commands.log
+create_user_fixture dangerous /home
+if CTF_USER=dangerous run_uninstaller; then
+    fail "uninstaller accepted a protected top-level home"
+fi
+assert_output_contains "Refusing protected home directory for 'dangerous': '/home'"
+[[ -d /home ]] || fail "uninstaller removed a protected top-level directory"
+if grep -Fq 'userdel ' /tmp/ctf-uninstall/commands.log; then
+    fail "uninstaller called userdel for a protected top-level home"
+fi
+
+# userdel removes the account but leaves a home it does not own. Refuse before
+# creating that partial-uninstall state.
+: > /tmp/ctf-uninstall/commands.log
+create_user_fixture wrongowner /tmp/ctf-uninstall/homes/wrongowner
+chown 0:0 /tmp/ctf-uninstall/homes/wrongowner
+if CTF_USER=wrongowner run_uninstaller; then
+    fail "uninstaller accepted a home owned by another UID"
+fi
+assert_output_contains "home directory is owned by UID 0, not 1001"
+[[ -e /tmp/ctf-uninstall/users/wrongowner \
+        && -d /tmp/ctf-uninstall/homes/wrongowner ]] \
+    || fail "uninstaller partially removed the wrong-owner fixture"
+if grep -Fq 'userdel ' /tmp/ctf-uninstall/commands.log; then
+    fail "uninstaller called userdel for a home owned by another UID"
+fi
+
+# A home symlink has ambiguous deletion semantics in userdel; reject it before
+# removing the account.
+: > /tmp/ctf-uninstall/commands.log
+mkdir -p /tmp/ctf-uninstall/homes/symlink-target
+chown 1001:1001 /tmp/ctf-uninstall/homes/symlink-target
+ln -s /tmp/ctf-uninstall/homes/symlink-target /tmp/ctf-uninstall/homes/symlink-home
+chown -h 1001:1001 /tmp/ctf-uninstall/homes/symlink-home
+printf '%s\n' /tmp/ctf-uninstall/homes/symlink-home \
+    > /tmp/ctf-uninstall/users/symlinkuser
+if CTF_USER=symlinkuser run_uninstaller; then
+    fail "uninstaller accepted a symlink home"
+fi
+assert_output_contains "Refusing symlink home directory for 'symlinkuser'"
+[[ -e /tmp/ctf-uninstall/users/symlinkuser \
+        && -L /tmp/ctf-uninstall/homes/symlink-home \
+        && -d /tmp/ctf-uninstall/homes/symlink-target ]] \
+    || fail "uninstaller partially removed the symlink-home fixture"
+if grep -Fq 'userdel ' /tmp/ctf-uninstall/commands.log; then
+    fail "uninstaller called userdel for a symlink home"
 fi
 
 # Protected accounts must be rejected before any destructive command.

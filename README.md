@@ -160,10 +160,11 @@ sudo env CTF_USER=teamctf bash uninstall_ctf.sh
 ```
 
 The script terminates that user's processes, deletes the account and its actual home
-directory, and verifies that both disappeared. It refuses UID 0, unsafe home paths,
-and homes referenced by another account. System packages (gdb, JDK, exiftool,
-wireshark, steghide, etc.) are intentionally left in place because other users may
-depend on them. Repeated runs are safe no-ops.
+directory, and verifies that both disappeared. It refuses UID 0, protected or
+symlinked home paths, homes not owned by the selected account, and paths that
+contain another account's home. System packages (gdb, JDK, exiftool, wireshark,
+steghide, etc.) are intentionally left in place because other users may depend on
+them. Repeated runs are safe no-ops.
 
 ## Mass deployment
 

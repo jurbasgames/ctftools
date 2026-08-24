@@ -30,31 +30,51 @@ if ! id -- "$CTF_USER" &>/dev/null; then
     echo "User '$CTF_USER' does not exist — nothing to do."
     exit 0
 fi
-if [[ "$(id -u -- "$CTF_USER")" == "0" ]]; then
+TARGET_UID="$(id -u -- "$CTF_USER")"
+if [[ "$TARGET_UID" == "0" ]]; then
     echo "[!] Refusing to remove UID 0 account '$CTF_USER'." >&2
     exit 1
 fi
 
 TARGET_HOME="$(getent passwd "$CTF_USER" | cut -d: -f6)"
-if [[ -z "$TARGET_HOME" || "$TARGET_HOME" == "/" ]]; then
+if [[ -z "$TARGET_HOME" || "$TARGET_HOME" != /* ]]; then
     echo "[!] Refusing unsafe home directory for '$CTF_USER': '$TARGET_HOME'." >&2
     exit 1
+fi
+if [[ -L "$TARGET_HOME" ]]; then
+    echo "[!] Refusing symlink home directory for '$CTF_USER': '$TARGET_HOME'." >&2
+    exit 1
+fi
+TARGET_HOME_CANON="$(realpath -m -- "$TARGET_HOME")"
+case "$TARGET_HOME_CANON" in
+    /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/snap|/srv|/sys|/tmp|/usr|/var)
+        echo "[!] Refusing protected home directory for '$CTF_USER': '$TARGET_HOME_CANON'." >&2
+        exit 1
+        ;;
+esac
+if [[ -e "$TARGET_HOME" ]]; then
+    HOME_UID="$(stat -c '%u' -- "$TARGET_HOME")"
+    if [[ "$HOME_UID" != "$TARGET_UID" ]]; then
+        echo "[!] Refusing to remove '$CTF_USER': home directory is owned by UID $HOME_UID, not $TARGET_UID." >&2
+        exit 1
+    fi
 fi
 
 if ! PASSWD_DB="$(getent passwd)"; then
     echo "[!] Could not enumerate accounts before removing '$CTF_USER'." >&2
     exit 1
 fi
-SHARED_HOME_USERS=()
 while IFS=: read -r account _password _uid _gid _gecos account_home _shell; do
-    if [[ "$account" != "$CTF_USER" && "$account_home" == "$TARGET_HOME" ]]; then
-        SHARED_HOME_USERS+=("$account")
+    if [[ "$account" == "$CTF_USER" || -z "$account_home" ]]; then
+        continue
+    fi
+    account_home_canon="$(realpath -m -- "$account_home")"
+    if [[ "$account_home_canon" == "$TARGET_HOME_CANON" \
+            || "$account_home_canon" == "$TARGET_HOME_CANON/"* ]]; then
+        echo "[!] Refusing to remove '$CTF_USER': home directory overlaps account '$account' ('$account_home')." >&2
+        exit 1
     fi
 done <<< "$PASSWD_DB"
-if (( ${#SHARED_HOME_USERS[@]} > 0 )); then
-    echo "[!] Refusing to remove '$CTF_USER': home directory is shared with: ${SHARED_HOME_USERS[*]}." >&2
-    exit 1
-fi
 
 echo "[*] Removing user '$CTF_USER' and home directory '$TARGET_HOME'..."
 pkill -u "$CTF_USER" 2>/dev/null || true
