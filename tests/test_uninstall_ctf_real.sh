@@ -28,9 +28,13 @@ STATE_FILE=/var/lib/ctftools/managed-user
 USERS=(teamctf unmanaged sysctf dupealpha dupebeta symlinkuser intermediate mountuser)
 
 cleanup() {
-    mountpoint -q /srv/mountuser/shared 2>/dev/null && umount -l /srv/mountuser/shared || true
+    if mountpoint -q /srv/mountuser/shared 2>/dev/null; then
+        umount -l /srv/mountuser/shared || true
+    fi
     for user in "${USERS[@]}"; do
-        id -- "$user" >/dev/null 2>&1 && userdel -r -- "$user" >/dev/null 2>&1 || true
+        if id -- "$user" >/dev/null 2>&1; then
+            userdel -r -- "$user" >/dev/null 2>&1 || true
+        fi
     done
     rm -rf /var/lib/ctftools /srv/teamctf /srv/unmanaged /srv/sysctf \
         /srv/dupealpha /srv/dupebeta /srv/symlink-real /srv/symlink-link \
