@@ -34,7 +34,8 @@ assert_log_contains() {
 }
 
 setup_fixture() {
-    rm -rf /tmp/ctf-test /tmp/ctftools-test /home/ctf
+    rm -rf /tmp/ctf-test /tmp/ctftools-test /home/ctf /home/teamctf \
+        /var/lib/ctftools
     mkdir -p /tmp/ctf-test/mockbin /tmp/ctftools-test/downloads
     cp /workspace/install_ctf.sh /tmp/ctftools-test/install_ctf.sh
     printf 'CTF_USER=ctf\nCTF_PASS=test-only\n' > /tmp/ctftools-test/.env
@@ -67,14 +68,30 @@ EOF
     cat > /tmp/ctf-test/mockbin/id <<'EOF'
 #!/usr/bin/env bash
 [[ "${1:-}" == "-nG" && "${2:-}" == "ctf" ]] && printf 'ctf wireshark\n' && exit 0
-[[ "${1:-}" == "ctf" ]] && [[ -f /tmp/ctf-test/user-exists ]] && exit 0
+if [[ "${1:-}" == "-u" ]]; then
+    shift
+    [[ "${1:-}" == "--" ]] && shift
+    [[ "${1:-}" == "ctf" && -f /tmp/ctf-test/user-exists ]] \
+        && printf '1001\n' && exit 0
+    exit 1
+fi
+[[ "${1:-}" == "--" ]] && shift
+[[ "${1:-}" == "ctf" && -f /tmp/ctf-test/user-exists ]] && exit 0
 [[ "${1:-}" == "ctf" ]] && exit 1
 exec /usr/bin/id "$@"
+EOF
+
+    cat > /tmp/ctf-test/mockbin/getent <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "passwd" && "${2:-}" == "ctf" \
+    && -f /tmp/ctf-test/user-exists ]] || exit 2
+printf 'ctf:x:1001:1001::/home/ctf:/bin/bash\n'
 EOF
 
     cat > /tmp/ctf-test/mockbin/useradd <<'EOF'
 #!/usr/bin/env bash
 printf 'useradd %s\n' "$*" >> /tmp/ctf-test/commands.log
+[[ "${CTF_TEST_STOP_USERADD:-0}" != "1" ]] || exit 77
 mkdir -p /home/ctf
 : > /home/ctf/.bashrc
 touch /tmp/ctf-test/user-exists
@@ -256,6 +273,7 @@ EOF
 
 run_installer() {
     CTF_TEST_GHIDRA_ALL_FAIL="${CTF_TEST_GHIDRA_ALL_FAIL:-0}" \
+        CTF_TEST_STOP_USERADD="${CTF_TEST_STOP_USERADD:-0}" \
         PATH="/tmp/ctf-test/mockbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
         bash /tmp/ctftools-test/install_ctf.sh >/tmp/ctf-test/install.log 2>&1
 }
@@ -273,6 +291,62 @@ setup_fixture
 
 # A real parse check happens before entering the mocked execution path.
 bash -n /tmp/ctftools-test/install_ctf.sh || fail "install_ctf.sh has invalid Bash syntax"
+
+# Each missing environment value must be filled independently from .env. The
+# password override must not make the installer forget CTF_USER from the file.
+printf 'CTF_USER=teamctf\nCTF_PASS=file-only\n' > /tmp/ctftools-test/.env
+: > /tmp/ctf-test/commands.log
+if env -u CTF_USER CTF_PASS=override CTF_TEST_STOP_USERADD=1 \
+        PATH="/tmp/ctf-test/mockbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        bash /tmp/ctftools-test/install_ctf.sh >/tmp/ctf-test/install.log 2>&1; then
+    fail "config contract probe unexpectedly completed the installer"
+fi
+assert_log_contains "useradd -m -d /home/teamctf -s /bin/bash -- teamctf"
+
+# .env is data, not shell. Command substitutions must remain inert and then be
+# rejected as an invalid literal username.
+rm -f /tmp/ctf-test/env-executed
+# The command substitution below is intentional literal test data.
+# shellcheck disable=SC2016
+printf 'CTF_USER=$(touch /tmp/ctf-test/env-executed; printf ctf)\nCTF_PASS=file-only\n' \
+    > /tmp/ctftools-test/.env
+: > /tmp/ctf-test/commands.log
+if env -u CTF_USER -u CTF_PASS CTF_TEST_STOP_USERADD=1 \
+        PATH="/tmp/ctf-test/mockbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+        bash /tmp/ctftools-test/install_ctf.sh >/tmp/ctf-test/install.log 2>&1; then
+    fail "installer accepted a command-like CTF_USER from .env"
+fi
+[[ ! -e /tmp/ctf-test/env-executed ]] || fail "installer executed .env as shell"
+if grep -Fq 'useradd ' /tmp/ctf-test/commands.log; then
+    fail "installer reached useradd for an invalid literal username"
+fi
+
+# Installer and uninstaller must enforce the same portable username grammar.
+rm -f /tmp/ctftools-test/.env
+: > /tmp/ctf-test/commands.log
+if CTF_USER=TeamCTF CTF_PASS=test-only CTF_TEST_STOP_USERADD=1 run_installer; then
+    fail "installer accepted an unsupported username"
+fi
+if grep -Fq 'useradd ' /tmp/ctf-test/commands.log; then
+    fail "installer called useradd for an unsupported username"
+fi
+
+# A pre-existing account without root-owned ctftools state must not have its
+# password or files changed.
+mkdir -p /home/ctf
+: > /home/ctf/.bashrc
+: > /tmp/ctf-test/user-exists
+: > /tmp/ctf-test/commands.log
+if CTF_USER=ctf CTF_PASS=test-only run_installer; then
+    fail "installer accepted an unmanaged existing account"
+fi
+grep -F "is not recorded as ctftools-managed" /tmp/ctf-test/install.log >/dev/null \
+    || fail "installer did not explain the unmanaged-account refusal"
+if grep -Fq 'chpasswd' /tmp/ctf-test/commands.log; then
+    fail "installer changed the password of an unmanaged account"
+fi
+
+setup_fixture
 
 # The curl-pipe path must work with environment variables and no .env file.
 rm /tmp/ctftools-test/.env
@@ -322,7 +396,7 @@ chmod +x /home/ctf/tools/john
 printf 'corrupt jar\n' > /home/ctf/tools/burpsuite.jar
 printf 'CTF_USER=ctf\nCTF_PASS=test-only\n' > /tmp/ctftools-test/.env
 run_installer || fail "installer is not idempotent on a second run"
-[[ "$(grep -Fc 'useradd -m -s /bin/bash ctf' /tmp/ctf-test/commands.log)" == "1" ]] \
+[[ "$(grep -Fc 'useradd -m -d /home/ctf -s /bin/bash -- ctf' /tmp/ctf-test/commands.log)" == "1" ]] \
     || fail "installer recreated the existing ctf user"
 [[ "$(grep -Fc 'chpasswd' /tmp/ctf-test/commands.log)" == "2" ]] \
     || fail "installer did not update the existing ctf user password"
@@ -333,6 +407,10 @@ run_installer || fail "installer is not idempotent on a second run"
 [[ ! -e /home/ctf/tools/burpsuite.jar.part ]] \
     || fail "installer left a partial Burp download behind"
 assert_log_contains "sudo-user ctf"
+[[ "$(cat /var/lib/ctftools/managed-user)" == $'ctf\t1001\t/home/ctf' ]] \
+    || fail "installer did not persist the managed account identity"
+[[ "$(stat -c '%u:%a' /var/lib/ctftools/managed-user)" == "0:600" ]] \
+    || fail "managed account state is not root-owned mode 0600"
 
 # If both Ghidra sources fail, only Ghidra is skipped and the installer keeps
 # the remaining tools usable.

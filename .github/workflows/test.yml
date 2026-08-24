@@ -8,16 +8,20 @@ permissions:
   contents: read
 
 jobs:
-  linux-installer:
+  linux-lifecycle:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - name: Check Bash syntax
-        run: bash -n install_ctf.sh make_bundle.sh uninstall_ctf.sh scan.sh deploy.sh
+        run: bash -n install_ctf.sh make_bundle.sh uninstall_ctf.sh scan.sh deploy.sh tests/test_install_ctf.sh tests/test_uninstall_ctf.sh tests/test_uninstall_ctf_real.sh
       - name: Run ShellCheck
-        run: shellcheck -x install_ctf.sh make_bundle.sh tests/test_install_ctf.sh
+        run: shellcheck -x install_ctf.sh uninstall_ctf.sh make_bundle.sh tests/test_install_ctf.sh tests/test_uninstall_ctf.sh tests/test_uninstall_ctf_real.sh
       - name: Run isolated Linux installer smoke test
         run: bash tests/test_install_ctf.sh
+      - name: Run isolated Linux uninstaller smoke test
+        run: bash tests/test_uninstall_ctf.sh
+      - name: Run real Linux destructive-safety matrix
+        run: bash tests/test_uninstall_ctf_real.sh
 
   windows-installer:
     runs-on: windows-latest

@@ -1,6 +1,6 @@
 #!/bin/bash
 # CTF Tools Installer
-# Creates user 'ctf' and installs tools in their home directory.
+# Creates and records the configured CTF user, then installs tools in its home.
 # Run with: sudo bash install_ctf.sh
 
 set -euo pipefail
@@ -9,18 +9,82 @@ export MAKEFLAGS="-j2"
 
 # ── Config ──────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [[ -z "${CTF_PASS:-}" && -f "$SCRIPT_DIR/.env" ]]; then
-    # shellcheck source=/dev/null
-    source "$SCRIPT_DIR/.env"
+STATE_DIR="/var/lib/ctftools"
+STATE_FILE="$STATE_DIR/managed-user"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Run this script with sudo: sudo bash $0"
+    exit 1
+fi
+
+trim_whitespace() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+parse_env_literal() {
+    local raw first last
+    raw="$(trim_whitespace "$1")"
+    if (( ${#raw} >= 2 )); then
+        first="${raw:0:1}"
+        last="${raw: -1}"
+        if [[ "$first" == "'" || "$first" == '"' ]]; then
+            if [[ "$last" != "$first" ]]; then
+                echo "[!] Unterminated quoted value in $SCRIPT_DIR/.env" >&2
+                return 1
+            fi
+            raw="${raw:1:${#raw}-2}"
+        fi
+    fi
+    CONFIG_VALUE="$raw"
+}
+
+load_env_defaults() {
+    local file="$1" line trimmed key raw
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        trimmed="$(trim_whitespace "$line")"
+        [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
+        if [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?(CTF_USER|CTF_PASS)[[:space:]]*=(.*)$ ]]; then
+            key="${BASH_REMATCH[2]}"
+            raw="${BASH_REMATCH[3]}"
+            parse_env_literal "$raw" || return 1
+            if [[ "$key" == "CTF_USER" && -z "${CTF_USER:-}" ]]; then
+                CTF_USER="$CONFIG_VALUE"
+            elif [[ "$key" == "CTF_PASS" && -z "${CTF_PASS:-}" ]]; then
+                CTF_PASS="$CONFIG_VALUE"
+            fi
+        fi
+    done < "$file"
+}
+
+if [[ -z "${CTF_USER:-}" || -z "${CTF_PASS:-}" ]] \
+        && [[ -e "$SCRIPT_DIR/.env" || -L "$SCRIPT_DIR/.env" ]]; then
+    if [[ ! -f "$SCRIPT_DIR/.env" || -L "$SCRIPT_DIR/.env" ]]; then
+        echo "[!] Refusing non-regular or symlink .env: $SCRIPT_DIR/.env" >&2
+        exit 1
+    fi
+    load_env_defaults "$SCRIPT_DIR/.env"
 fi
 
 CTF_USER="${CTF_USER:-ctf}"
+if [[ ! "$CTF_USER" =~ ^[a-z_][a-z0-9_-]*[$]?$ || ${#CTF_USER} -gt 32 ]]; then
+    echo "[!] Invalid CTF_USER: '$CTF_USER'. Use a portable lowercase Linux account name." >&2
+    exit 1
+fi
 if [[ -z "${CTF_PASS:-}" ]]; then
     echo "[!] Set CTF_PASS or create $SCRIPT_DIR/.env"
     exit 1
 fi
-TOOLS_DIR="/home/$CTF_USER/tools"
-VENV_DIR="/home/$CTF_USER/venv"
+if [[ "$CTF_PASS" == *$'\n'* || "$CTF_PASS" == *$'\r'* ]]; then
+    echo "[!] CTF_PASS must not contain line breaks." >&2
+    exit 1
+fi
+HOME_DIR="/home/$CTF_USER"
+TOOLS_DIR="$HOME_DIR/tools"
+VENV_DIR="$HOME_DIR/venv"
 
 # ── Pinned versions ──────────────────────────────────────────────────────────
 GHIDRA_VER="12.1.2"
@@ -46,12 +110,13 @@ ROCKYOU_SHA256="ded2d962815e1256df8f3a0d25173c4b21b6eee636117c36999246725a6d8f9f
 info()  { echo "[*] $*"; }
 ok()    { echo "[+] $*"; }
 skip()  { echo "[-] $* — skipping (already done)"; }
+die()   { echo "[!] $*" >&2; exit 1; }
 
 as_ctf() { sudo -u "$CTF_USER" "$@"; }
 
 as_ctf_cli() {
     sudo -u "$CTF_USER" env \
-        HOME="/home/$CTF_USER" \
+        HOME="$HOME_DIR" \
         USER="$CTF_USER" \
         LOGNAME="$CTF_USER" \
         TERM="${TERM:-xterm}" \
@@ -82,21 +147,94 @@ verify_sha256() {
     fi
 }
 
-# ── 0. Root check ─────────────────────────────────────────────────────────────
-if [[ $EUID -ne 0 ]]; then
-    echo "Run this script with sudo: sudo bash $0"
-    exit 1
-fi
+# ── 1. Create and record the managed user ─────────────────────────────────────
+assert_state_storage_safe() {
+    local owner mode
+    if [[ -e "$STATE_DIR" || -L "$STATE_DIR" ]]; then
+        [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] \
+            || die "Refusing unsafe state directory: $STATE_DIR"
+        owner="$(stat -c '%u' -- "$STATE_DIR")"
+        mode="$(stat -c '%a' -- "$STATE_DIR")"
+        if [[ "$owner" != "0" ]] || (( (8#$mode & 022) != 0 )); then
+            die "State directory must be root-owned and not group/world-writable: $STATE_DIR"
+        fi
+    fi
+}
 
-# ── 1. Create user ────────────────────────────────────────────────────────────
+load_managed_state() {
+    local owner mode extra
+    local -a lines=()
+    if [[ ! -e "$STATE_FILE" && ! -L "$STATE_FILE" ]]; then
+        return 1
+    fi
+    assert_state_storage_safe
+    [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] \
+        || die "Refusing unsafe managed-account state: $STATE_FILE"
+    owner="$(stat -c '%u' -- "$STATE_FILE")"
+    mode="$(stat -c '%a' -- "$STATE_FILE")"
+    if [[ "$owner" != "0" ]] || (( (8#$mode & 022) != 0 )); then
+        die "Managed-account state must be root-owned and not group/world-writable."
+    fi
+    mapfile -t lines < "$STATE_FILE"
+    (( ${#lines[@]} == 1 )) || die "Malformed managed-account state."
+    IFS=$'\t' read -r MANAGED_USER MANAGED_UID MANAGED_HOME extra <<< "${lines[0]}"
+    if [[ -z "$MANAGED_USER" || ! "$MANAGED_UID" =~ ^[0-9]+$ \
+            || -z "$MANAGED_HOME" || -n "$extra" ]]; then
+        die "Malformed managed-account state."
+    fi
+}
+
+write_managed_state() {
+    local tmp
+    assert_state_storage_safe
+    install -d -o root -g root -m 0755 "$STATE_DIR" || return 1
+    tmp="$(mktemp "$STATE_DIR/.managed-user.XXXXXX")" || return 1
+    if ! printf '%s\t%s\t%s\n' "$CTF_USER" "$TARGET_UID" "$HOME_DIR" > "$tmp" \
+            || ! chown root:root "$tmp" || ! chmod 0600 "$tmp" \
+            || ! mv -fT -- "$tmp" "$STATE_FILE"; then
+        rm -f -- "$tmp"
+        return 1
+    fi
+}
+
 info "Creating user '$CTF_USER'..."
-if id "$CTF_USER" &>/dev/null; then
-    skip "User '$CTF_USER' already exists"
+if id -- "$CTF_USER" &>/dev/null; then
+    if ! load_managed_state; then
+        die "User '$CTF_USER' already exists but is not recorded as ctftools-managed. Refusing to modify it."
+    fi
+    TARGET_UID="$(id -u -- "$CTF_USER")"
+    TARGET_HOME_RAW="$(getent passwd "$CTF_USER" | cut -d: -f6)"
+    TARGET_HOME_LEX="$(realpath -ms -- "$TARGET_HOME_RAW")"
+    TARGET_HOME_PHYS="$(realpath -m -- "$TARGET_HOME_RAW")"
+    if [[ "$MANAGED_USER" != "$CTF_USER" || "$MANAGED_UID" != "$TARGET_UID" \
+            || "$MANAGED_HOME" != "$TARGET_HOME_LEX" \
+            || "$TARGET_HOME_PHYS" != "$TARGET_HOME_LEX" ]]; then
+        die "Existing account does not match the root-owned ctftools state."
+    fi
+    HOME_DIR="$MANAGED_HOME"
+    TOOLS_DIR="$HOME_DIR/tools"
+    VENV_DIR="$HOME_DIR/venv"
+    skip "User '$CTF_USER' already exists and matches managed state"
 else
-    useradd -m -s /bin/bash "$CTF_USER"
-    ok "User '$CTF_USER' created"
+    if load_managed_state; then
+        die "Managed state already belongs to '$MANAGED_USER'; refusing to create '$CTF_USER'."
+    fi
+    useradd -m -d "$HOME_DIR" -s /bin/bash -- "$CTF_USER"
+    TARGET_UID="$(id -u -- "$CTF_USER")"
+    TARGET_HOME_RAW="$(getent passwd "$CTF_USER" | cut -d: -f6)"
+    TARGET_HOME_LEX="$(realpath -ms -- "$TARGET_HOME_RAW")"
+    TARGET_HOME_PHYS="$(realpath -m -- "$TARGET_HOME_RAW")"
+    if [[ "$TARGET_HOME_LEX" != "$HOME_DIR" || "$TARGET_HOME_PHYS" != "$HOME_DIR" ]]; then
+        userdel -r -- "$CTF_USER" 2>/dev/null || true
+        die "New account home does not match the expected path '$HOME_DIR'."
+    fi
+    if ! write_managed_state; then
+        userdel -r -- "$CTF_USER" 2>/dev/null || true
+        die "Could not persist root-owned managed-account state. Account creation was rolled back."
+    fi
+    ok "User '$CTF_USER' created and recorded as ctftools-managed"
 fi
-echo "$CTF_USER:$CTF_PASS" | chpasswd
+printf '%s:%s\n' "$CTF_USER" "$CTF_PASS" | chpasswd
 ok "Password set"
 
 mkdir -p "$TOOLS_DIR"
@@ -134,7 +272,7 @@ else
     as_ctf git clone --depth=1 --branch "$PWNDBG_TAG" https://github.com/pwndbg/pwndbg "$PWNDBG_DIR"
     # setup.sh must run as root to install system deps, but configures gdb for ctf user
     # Must cd into the pwndbg dir first — uv looks for pyproject.toml in the cwd
-    (cd "$PWNDBG_DIR" && HOME="/home/$CTF_USER" SUDO_USER="$CTF_USER" bash setup.sh)
+    (cd "$PWNDBG_DIR" && HOME="$HOME_DIR" SUDO_USER="$CTF_USER" bash setup.sh)
     ok "pwndbg ${PWNDBG_TAG} installed"
 fi
 
@@ -392,7 +530,7 @@ else
 fi
 
 # ── 11. Configure .bashrc ─────────────────────────────────────────────────────
-BASHRC="/home/$CTF_USER/.bashrc"
+BASHRC="$HOME_DIR/.bashrc"
 MARKER="# CTF tools setup"
 info "Configuring .bashrc..."
 if grep -q "$MARKER" "$BASHRC" 2>/dev/null; then
@@ -408,7 +546,7 @@ EOF
 fi
 
 # ── 12. Final ownership fix ───────────────────────────────────────────────────
-chown -R "$CTF_USER:$CTF_USER" "/home/$CTF_USER"
+chown -R "$CTF_USER:$CTF_USER" "$HOME_DIR"
 
 # ── 13. Verify the installed CLI as the CTF user ─────────────────────────────
 info "Verifying installed tools as '$CTF_USER'..."
